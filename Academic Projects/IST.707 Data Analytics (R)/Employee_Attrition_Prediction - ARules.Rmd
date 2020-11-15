@@ -1,0 +1,293 @@
+#Employee_Attrition with Associaiton_Rules_Mining
+
+**library needed packages
+```{r}
+library(arules)
+library(arulesViz)
+library(dplyr)
+library(tidyverse)
+library(readr)
+library(corrplot)
+library(caret)
+library(ggplot2)
+library(scales)
+```
+
+**Input Data
+```{r}
+raw_attrition <- read_csv(file = "employee_attrition.csv")
+```
+
+**data cleaning**
+*feature selection*
+```{r}
+#remove irrelavant columns using domain knowledge 
+#remove columns with only one value
+raw_attrition$EmployeeCount <-NULL
+raw_attrition$Over18 <-NULL
+raw_attrition$EmployeeNumber <- NULL
+raw_attrition$StandardHours <- NULL
+str(raw_attrition)
+
+```
+
+*outliers*
+```{r}
+#check max and min and box-plot each column for outliers
+summary(raw_attrition)
+#found two outliers
+raw_attrition[which.max(raw_attrition$TotalWorkingYears),]
+#total working years=114 is found, by domain knowledge, it might be a typo of writing 14 as 114, so replace with prediction
+raw_attrition$TotalWorkingYears[which.max(raw_attrition$TotalWorkingYears)] <- 14
+#another outlier
+raw_attrition[which.max(raw_attrition$YearsWithCurrManager),]
+#years with current manager = 219 is found, might be a typo of writing 19 as 219, therefore replace with prediction
+raw_attrition$YearsWithCurrManager[which.max(raw_attrition$YearsWithCurrManager)] <- 19
+#did found an outlier in distance from home as 224, but remote working is possible, so replace with the second highest
+raw_attrition$DistanceFromHome[which.max(raw_attrition$DistanceFromHome)] <- max(raw_attrition$DistanceFromHome[raw_attrition$DistanceFromHome!=max(raw_attrition$DistanceFromHome,na.rm=TRUE)],na.rm=TRUE)
+```
+
+*check duplicate rows*
+```{r}
+isTRUE(all.equal.default(nrow(raw_attrition),nrow(raw_attrition[!duplicated(raw_attrition),])))
+```
+no duplicate detected
+
+*check missing values*
+the sample size is 1176, which is quite small for association rules mining. Therefore, choose to replace the NAs instead of 
+removing the rows with NAs
+```{r}
+#detect NAs in each column
+sapply(raw_attrition,function(x) sum(is.na(x)))
+#replace NAs with mean
+raw_attrition$DistanceFromHome[which(is.na(raw_attrition$DistanceFromHome))] <- round(mean(raw_attrition$DistanceFromHome, na.rm=TRUE))
+raw_attrition$JobLevel[which(is.na(raw_attrition$JobLevel))] <- round(mean(raw_attrition$JobLevel, na.rm=TRUE))
+raw_attrition$PercentSalaryHike[which(is.na(raw_attrition$PercentSalaryHike))] <- round(mean(raw_attrition$PercentSalaryHike, na.rm=TRUE))
+raw_attrition$PerformanceRating[which(is.na(raw_attrition$PerformanceRating))] <- round(mean(raw_attrition$PerformanceRating, na.rm=TRUE))
+raw_attrition$RelationshipSatisfaction[which(is.na(raw_attrition$RelationshipSatisfaction))] <- round(mean(raw_attrition$RelationshipSatisfaction, na.rm=TRUE))
+raw_attrition$TotalWorkingYears[which(is.na(raw_attrition$TotalWorkingYears))] <- round(mean(raw_attrition$TotalWorkingYears, na.rm=TRUE))
+raw_attrition$YearsSinceLastPromotion[which(is.na(raw_attrition$YearsSinceLastPromotion))] <- round(mean(raw_attrition$YearsSinceLastPromotion, na.rm=TRUE))
+
+```
+two more NAs found in OverTime and Gender columns. Since our sample size is small, I do not want to delete entire rows. But for such attributes,
+it is hard to give it a reasonable prediction based on other variables of the same row. So I will have 'NoInfo' as a third level for these two attributes,
+and such alternation will not make any impact on association rules mining by setting appropriate support value.
+```{r}
+raw_attrition$OverTime[which(is.na(raw_attrition$OverTime))] <- "NoInfo"
+raw_attrition$Gender[which(is.na(raw_attrition$Gender))] <- "NoInfo"
+#check if there is any NA left
+sapply(raw_attrition,function(x) sum(is.na(x)))
+```
+
+*check variance of each column*
+```{r}
+names(raw_attrition)[nearZeroVar(raw_attrition)]
+```
+no column is idenfified as near zero variance
+data cleaning is done, ready for descriptive analysis
+
+*EDA*
+```{r}
+str(raw_attrition)
+#Extract columns with numerical values
+num_attrition <- raw_attrition[lapply(raw_attrition,class)=="numeric"]
+#make correlation matrix
+cor_matrix <- cor(num_attrition,method = "pearson")
+corrplot(cor_matrix,type = "upper")
+```
+found some volumns are positively correlated and some other columns are negatively correlated, most columns are not directly correlated strongly positively correlated:
+Age & TotalWorkingYears, JobLevel & MonthlyIncome, JobLevel & TotalWorkingYears, MonthlyIncome & TotalWorkingYears, PercentSalaryHike & PerformanceRating
+YearsAtCompany & YearsInCurrentRole, YearsAtCompany & YearsWithCurrentManager, YearsInCurrentRole & YearsWithCurrentManager
+By common sense and domain knowledge in human resource, these correlations are very reasonable and commonly found across industries
+So the results of the correlation matrix add more reliability of the dataset used
+
+*visulization*
+```{r}
+#convert columns with chr values to factors
+attrition <- raw_attrition
+chr_col <- c("Attrition","BusinessTravel","Department","EducationField","Gender","JobRole","MaritalStatus","OverTime")
+attrition[,chr_col] <- lapply((attrition[,chr_col]),as.factor)
+#bar-plot of Attrition
+attri_dist <- ggplot(attrition, aes(x=Attrition,y=(..count..)/sum(..count..)),fill=Attrition)+
+              geom_bar()
+attri_dist             
+```
+most of the employees are staying, less than 20% of the total quit their job
+```{r}
+#barplot Gender vs Attrition
+gender_attri <- ggplot(attrition)+
+                geom_bar(aes(x=Gender,fill=Attrition,color=Attrition))
+gender_attri
+```
+no obvious difference of gender in the distribution of Attrition
+```{r}
+#density plot of MonthlyIncome vs Attrition
+Income_attri <- ggplot(attrition)+
+                geom_density(aes(x=MonthlyIncome,fill=Attrition),alpha=0.8)
+Income_attri  
+```
+many employees who left the company had low imcome, interestingly, the distribution of Attrition=Yes has two local peaks at Income=10000 and 20000 
+```{r}
+#box plot monthlyIncome vs JobLevel
+Income_JobLv <- ggplot(attrition,aes(x=as.factor(JobLevel),y=MonthlyIncome))+
+    geom_boxplot()
+Income_JobLv
+```
+proved our finding from the correlation matrix, JobLevel and MonthlyIncome are strongly positively correlated
+Do employees staying at the company longer always tend to stay?
+```{r}
+#StayingPercentage wrt YearsAtCompany
+stay <- table(attrition$Attrition,attrition$YearsAtCompany)[1,]
+total <- table(attrition$Attrition,attrition$YearsAtCompany)[1,]+table(attrition$Attrition,attrition$YearsAtCompany)[2,]
+staypct <- round(stay/total,3)
+staypct
+```
+Employees staying longer in the company tend to stay with the company more comparing to new employees
+```{r}
+#density plot of YearsAtCompany vs Attrition
+YearInComp_attri <- ggplot(attrition)+
+  geom_density(aes(x=YearsAtCompany,fill=Attrition),alpha=0.8)
+YearInComp_attri
+```
+overtime & businesstravel can naively tell degree of tiredness
+use box-plot to see how overtime and travel influence salary
+```{r}
+tiredness_income <- ggplot(attrition,aes(x=OverTime,y=MonthlyIncome))+
+                    geom_boxplot()+
+                    facet_grid(~BusinessTravel)
+tiredness_income
+```
+
+*arules mining preparation*
+```{r}
+#convert Likert Scales columns to factors
+str(attrition)
+conv_col <- c("Education","EnvironmentSatisfaction","JobInvolvement","JobLevel","JobSatisfaction","PerformanceRating","RelationshipSatisfaction","StockOptionLevel","WorkLifeBalance")
+attrition[,conv_col] <- lapply((attrition[,conv_col]),as.factor)
+```
+
+```{r}
+#convert numerical columns to factors for arules mining
+#check distribution, then discretize accordingly
+#example with how to discretize Age
+hist(attrition$Age,breaks=10)
+#found it is normally distributed
+#try different discretization methods and breaks, such as cluster,frequency,fixed, see which works the best and fits the distribution
+attrition$Age <- arules::discretize(attrition$Age,method = "cluster",breaks = 3, labels = c(1,2,3))
+#do the same thing for other attributes
+attrition$DailyRate <- arules::discretize(attrition$DailyRate,method = "cluster",breaks = 3, labels = c("low","mid","high"))
+attrition$DistanceFromHome <- arules::discretize(attrition$DistanceFromHome,method = "cluster",breaks = 3, labels = c("low","mid","high"))
+attrition$HourlyRate <- arules::discretize(attrition$HourlyRate,method = "cluster",breaks = 3, labels = c("low","mid","high"))
+#distribution of monthlyIncome spreads out, so give more breaks
+attrition$MonthlyIncome <- arules::discretize(attrition$MonthlyIncome,method = "cluster",breaks = 5, labels = c(1,2,3,4,5))
+attrition$MonthlyRate <- arules::discretize(attrition$MonthlyRate,method = "cluster",breaks = 3, labels = c("low","mid","high"))
+attrition$NumCompaniesWorked <- arules::discretize(attrition$NumCompaniesWorked,method = "cluster",breaks = 3, labels = c("few","several","many"))
+#percentsalaryhike right skewed
+attrition$PercentSalaryHike <- arules::discretize(attrition$PercentSalaryHike,method = "cluster",breaks = 4, labels = c(1,2,3,4))
+attrition$TotalWorkingYears <- arules::discretize(attrition$TotalWorkingYears,method = "cluster",breaks = 4, labels = c(1,2,3,4))
+#years in current role distribution has two local peaks, frequency&cluster do not work well, assign breaks manually
+attrition$YearsInCurrentRole <- cut(attrition$YearsInCurrentRole,breaks = c(0,2.1,6.1,9.1,100),labels = c(1,2,3,4),right = FALSE)
+attrition$TrainingTimesLastYear <- arules::discretize(attrition$TrainingTimesLastYear,method = "cluster",breaks = 3, labels = c("few","several","many"))
+attrition$YearsAtCompany <- arules::discretize(attrition$YearsAtCompany,method = "cluster",breaks = 3, labels = c("few","several","many"))
+attrition$YearsSinceLastPromotion <- arules::discretize(attrition$YearsSinceLastPromotion,method = "cluster",breaks = 3, labels = c("recently","a while","long ago"))
+#years with current manager distribution has two local peaks, frequency&cluster do not work well, assign breaks manually
+attrition$YearsWithCurrManager <- cut(attrition$YearsWithCurrManager,breaks = c(0,2.1,6.1,9.1,100),labels = c(1,2,3,4),right = FALSE)
+str(attrition)
+```
+all the attributes are converted to factors now
+
+*Association Rules Mining*
+apply association rules with default hyper-parameters
+```{r}
+rules <- apriori(data = attrition,appearance = list(rhs = "Attrition=No",default ='lhs'))
+inspect(head(sort(rules,by="lift",decreasing = T),10))
+```
+
+{}found on lhs, redundant rules found
+
+adjust hyper-parameters and try use association rules again
+```{r}
+rules <- apriori(data = attrition,parameter = list(support = 0.05,confidence=0.8,minlen = 2),appearance = list(rhs = "Attrition=No",default ='lhs'))
+inspect(head(sort(rules,by = "lift",decreasing = T),10))
+```
+rules with top lift values are too complex i.e. including many predictors, may overfit the data
+
+```{r}
+rules <- apriori(data = attrition,parameter = list(support = 0.3,confidence=0.9,maxlen = 4),appearance = list(rhs = "Attrition=No",default ='lhs'))
+inspect(head(sort(rules,by = "lift",decreasing = T),10))
+```
+rules are too rigid with fewer predictors. They are not capturing salient patterns leading to no attrition, can be proved by the decrease of lift
+
+final result
+```{r}
+rules <- apriori(data = attrition,parameter = list(support = 0.04,confidence=0.6,minlen = 2,maxlen = 6),appearance = list(rhs = "Attrition=No",default ='lhs'))
+#remove redundant rules
+subset_rules <- which(colSums(is.subset(rules,rules)) > 1)
+rules <- sort(rules[-subset_rules], by  = "lift", decreasing = T)
+inspect(head(rules,5))
+```
+top five rules found leading to Attrition="No"
+ JobRole = Research Director
+ JobRole = Manager
+ MonthlyIncome = 5 (highest Income)
+ JobLevel = 4 (very high)
+ YearsWithCurrentManager = 4 (stayed 10+ years with current manager)
+
+plot the rules 
+```{r}
+plot(rules,measure = c("support","lift"),shading="confidence")
+```
+
+*do the same thing on Attrition=Yes*
+run arules with default hyper-parameter
+```{r}
+rules <- apriori(data = attrition,appearance = list(rhs = "Attrition=Yes",default ='lhs'))
+inspect(head(sort(rules,by="lift",decreasing = T),10))
+```
+no rules found, because support=0.1 is too high, we only have 185 rows of Attrition="Yes"
+
+tried different support values and found 0.013 is an appropriate choice for this dataset
+```{r}
+rules <- apriori(data = attrition,parameter = list(support = 0.013,confidence = 0.9,minlen = 2,maxlen = 6),appearance = list(rhs = "Attrition=Yes",default ='lhs'))
+inspect(head(sort(rules,by = "lift",decreasing = T),10))
+#remove redundant rules
+subset_rules <- which(colSums(is.subset(rules,rules)) > 1)
+rules <- sort(rules[-subset_rules], by  = "lift", decreasing = T)
+inspect(head(rules,5))
+```
+top 5 rules by lift
+Age=1,BusinessTravel=Travel_Frequently,JobLevel=1,MaritalStatus=Single
+Age=1,BusinessTravel=Travel_Frequently,MaritalStatus=Single,MonthlyIncome=1
+Education=3,JobLevel=1,OverTime=Yes,StockOptionLevel=0,YearsInCurrentRole=1
+Age=1,JobInvolvement=3,OverTime=Yes,StockOptionLevel=0,YearsInCurrentRole=1
+Age=1,BusinessTravel=Travel_Frequently,MonthlyIncome=1,StockOptionLevel=0
+
+plot the rules 
+```{r}
+plot(rules,measure = c("support","lift"),shading="confidence")
+```
+
+*interpretation of results*
+For Attrition="Yes":
+
+Since the majority of the attrition attribute is "No" as employee stays, suport(Attrition=No) is high, and it is very hard to generate rules with very high lift.
+Because the background is composed of mostly rows with "Attrition=Yes", the background confidence of achieving "Attrition=No" is
+already high. Thus, our top five rules with highest lift values have very high confidence values. Looking at the top five rules obtained,
+we have research director and manager as JobRole leading to employee staying at the company, and it is consistent with the thid and the fourth rule found, which
+are JobLevel=4 and MonthlyIncome=5. Lastly, we have YearsWithCurrentManager=4, standing for working under the current manager for 10+ years. As we can expect,
+a large portion of this group are on the manager/director level, which again, overlaps with employees identified by the first four rules. So in general, the well-paid
+high-level managers/directors in this company tend to stay with the company comparing to the rest of the employees.
+
+
+For Attrition="No":
+
+Since we only have 185 rows with "Attrition=Yes", i.e. the employee has left the company, the support values of the top rules are very small. One obvious different
+between the rules leading to attrition and stay is that the rules leading to attrition are more complicated. This can be explained by the correlation matrix and the 
+distribution of Attrition. Since there is no single attribute or a specific level (with many counts) of any factor strongly correlated to "Attrition=Yes", we can not 
+expect a single predictor as a rule with high lift leading to attrition. The top five rules of attrition all have lift values larger than 6, because support("Attrition=Yes) is very low, and confidence values of our top rules are pretty high. Obviously, some predictors appear multiple times among the top five rules, for example, Age=1 (<=32 yeras old), BusinessTravel=Travel_frequently, Years with Manger=1 (<= 2 years), and StockOptionLevel=0. These predictors are targeting the young entry-level employees with lower income and high pressure from business travels. 
+
+Overall, the top rules leading to retention and attrition are consistent with our domain knowledge in the HR field. Young entry-level employees tend to job-hop for
+higher income or lower pressure, while the decision makers tend to retain.
+
+*shiny app for Association Rules Mining*
+https://fyuan04.shinyapps.io/hw1Fangzhou/

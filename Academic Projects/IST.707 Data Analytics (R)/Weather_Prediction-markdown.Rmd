@@ -1,0 +1,488 @@
+---
+title: "Weather Forecasting with K-Means, HA Clustering, and Decision Tree"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r, echo==FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**library needed packages
+```{r}
+library(dplyr)
+library(tidyverse)
+library(mice)
+library(caret)
+library(corrplot)
+library(ggplot2)
+library(gridExtra)
+library(distances)
+library(fastcluster)
+library(purrr)
+library(factoextra)
+library(plyr)
+library(dplyr)
+library(rpart)
+library(caret)
+library(rattle)
+library(pROC)
+library(clue)
+library(class)
+```
+
+**Input Data**
+```{r}
+traindf <- read_csv(file = "Weather Forecast Training.csv")
+```
+
+**data cleaning**
+```{r}
+str(traindf)
+NA_table <- sort(sapply(traindf, function(x) sum(is.na(x))))
+NA_table
+```
+there are about 50% missing values in columns Cloud, Evaporation, and Sunchine, using imputation might influence the prediction result in a bad way. So I decided
+to drop them and see how the models work
+*feature selection*
+```{r}
+traindf$Cloud <- NULL
+traindf$Evaporation <- NULL
+traindf$Sunshine <- NULL
+```
+
+after running through all the clustering and decision tree model, I found the categorical attributes: WindDir and WindGustDir do not help improving the models, while 
+slowing down the imputation process by a huge amount. Thus I am dropping them before any imputation and analysis
+```{r}
+traindf$WindGustDir <- NULL
+traindf$WindDir <- NULL
+
+```
+
+select the columns with character values and convert to factors, although mice does not work very well on categorical attributes. But this is most convinient way
+that I can think of to impute the categorical attributes reasonably except simply drop them off.
+```{r}
+conv_cols <- c('Location','RainToday','RainTomorrow')
+imp_train <- traindf
+imp_train[conv_cols] <- lapply(traindf[conv_cols], as.factor)
+#take a closer look at the missing values and use the  MICE package for imputation
+impute <- mice(imp_train[,!names(traindf)%in% c('RainTomorrow')],method='pmm',maxit = 2)
+miceout <- complete(impute)
+#replace the columns with NAs with the output from mice
+traindf$MaxTemp <- miceout$MaxTemp
+traindf$MinTemp <- miceout$MinTemp
+traindf$Rainfall <- miceout$Rainfall
+traindf$RainToday <- miceout$RainToday
+traindf$WindSpeed <- miceout$WindSpeed
+traindf$Temp <- miceout$Temp
+traindf$Humidity <- miceout$Humidity
+traindf$WindGustSpeed <- miceout$WindGustSpeed
+traindf$Pressure <- miceout$Pressure
+#check if there is any NAs left
+NA_table <- sort(sapply(traindf, function(x) sum(is.na(x))))
+NA_table
+```
+no missing values found
+
+Since we are doing clusters and classfications in this project, we do not want outliers to influence the result, so look at extreme values and deal with outliers
+by substituting the values that are larger than the higher whisker with the higher whisker. Similarly, substitute the values that are lower than the lower whisker
+with the value of the lower whisker
+```{r}
+summary(traindf)
+#replace the outliers with whiskers for all numeric columns
+traindf$MinTemp[traindf$MinTemp < boxplot(traindf$MinTemp)$stats[1,]] <- boxplot(traindf$MinTemp)$stats[1,]
+traindf$MinTemp[traindf$MinTemp > boxplot(traindf$MinTemp)$stats[5,]] <- boxplot(traindf$MinTemp)$stats[5,]
+
+traindf$MinTemp[traindf$MaxTemp < boxplot(traindf$MaxTemp)$stats[1,]] <- boxplot(traindf$MaxTemp)$stats[1,]
+traindf$MinTemp[traindf$MaxTemp > boxplot(traindf$MaxTemp)$stats[5,]] <- boxplot(traindf$MaxTemp)$stats[5,]
+
+traindf$MinTemp[traindf$Rainfall < boxplot(traindf$Rainfall)$stats[1,]] <- boxplot(traindf$Rainfall)$stats[1,]
+traindf$MinTemp[traindf$Rainfall > boxplot(traindf$Rainfall)$stats[5,]] <- boxplot(traindf$Rainfall)$stats[5,]
+
+traindf$MinTemp[traindf$WindGustSpeed < boxplot(traindf$WindGustSpeed)$stats[1,]] <- boxplot(traindf$WindGustSpeed)$stats[1,]
+traindf$MinTemp[traindf$WindGustSpeed > boxplot(traindf$WindGustSpeed)$stats[5,]] <- boxplot(traindf$WindGustSpeed)$stats[5,]
+
+traindf$MinTemp[traindf$WindSpeed < boxplot(traindf$WindSpeed)$stats[1,]] <- boxplot(traindf$WindSpeed)$stats[1,]
+traindf$MinTemp[traindf$WindSpeed > boxplot(traindf$WindSpeed)$stats[5,]] <- boxplot(traindf$WindSpeed)$stats[5,]
+
+traindf$MinTemp[traindf$Humidity < boxplot(traindf$Humidity)$stats[1,]] <- boxplot(traindf$Humidity)$stats[1,]
+traindf$MinTemp[traindf$Humidity > boxplot(traindf$Humidity)$stats[5,]] <- boxplot(traindf$Humidity)$stats[5,]
+
+traindf$MinTemp[traindf$Pressure < boxplot(traindf$Pressure)$stats[1,]] <- boxplot(traindf$Pressure)$stats[1,]
+traindf$MinTemp[traindf$Pressure > boxplot(traindf$Pressure)$stats[5,]] <- boxplot(traindf$Pressure)$stats[5,]
+
+traindf$MinTemp[traindf$Temp < boxplot(traindf$Temp)$stats[1,]] <- boxplot(traindf$Temp)$stats[1,]
+traindf$MinTemp[traindf$Temp > boxplot(traindf$Temp)$stats[5,]] <- boxplot(traindf$Temp)$stats[5,]
+```
+all numeric outliers are treated properly, the data is ready for analysis
+
+**Exploratory Data Analysis**
+```{r}
+#get correlation matrix among numerical variables
+train_num <- select_if(traindf,is.numeric)
+train_cor <- cor(train_num,method = "pearson")
+corrplot(train_cor,type = "upper")
+```
+the correlation matrix shows that maxtemp and temp are strongly positively correlated, humidity and temp are negatively correlated
+windgustspeed is positively correlated to windspeed. Such finding are pretty trivial and consistent with our common experience with weather
+So no interesting patterns found through correlation matrix
+
+make a bar plot of raintoday and raintomorrow
+```{r}
+today_tomorrow <- ggplot(traindf)+geom_bar(aes(x=RainToday,fill=RainTomorrow))+coord_cartesian(ylim = c(0,40000))
+today_tomorrow
+```
+According to the plot, we can tell that if there is no rain today, the probability of raining tomorrow is less than not raining.
+However, if it is raining today, the likelihood of raining tomorrow is much higher than not raining tomorrow.
+
+make a density plot of raintomorrow and humidity
+```{r}
+hum_rain1 <- ggplot(traindf,aes(Humidity))+geom_density(aes(fill=factor(RainToday)),alpha=0.7)
+hum_rain2 <- ggplot(traindf,aes(Humidity))+geom_density(aes(fill=factor(RainTomorrow)),alpha=0.7)
+grid.arrange(hum_rain1,hum_rain2,ncol=2)
+```
+The first density plot shows the humidity distribution of whether it rains today. Apparantly, when it rains, the humidity is higher 
+than humidity of the days that are not raining. But we do have a large overlap area in plot, which tells us 
+humidity is not a very good predictor for raining today especially in the interval of 40-75. At lower values, for example, When the 
+humidity is close to 0, it is impossible that today is raining.
+Then looking at the plot on the right, the overlap is smaller, and higher humidity tends to result in raining tomorrow. The higher 
+the value we have, the more likelihood of raining tomorrow. Interestingly, if today's humidity is very low, there is still some chance
+that it will rain tomorrow.
+
+make a scatter plot of humidity vs raintomorrow
+```{r}
+temp_hum <- ggplot(traindf,aes(x=Temp,y=Humidity))+geom_point(aes(color=as.factor(RainTomorrow)))
+temp_hum
+```
+the scatter plot shows a general trend of higher temperature is correlated with lower humidity. But from eyeball, the correlation is not
+very strong, and it can be proved by the correlation matrix. By the color, we can tell that under most cases with differnet combinations 
+of temperature and humidity, there is no obvious pattern of how they lead to rainfall tomorrow, in the range of temp=0-30 and humidity=
+75-100, it is most likely going to rain tomorrow. As humidity goes down and temperature increases, the density of red dots 
+(no rain tomorrow) increases. Thus, humidity might be an interesting attribute to look at when we are doing classifications.
+
+**K-means Clustering**
+Preparation
+since k-means perform poorly on categorical data, and here in this dataset, the location and wind direction data can not be transformed 
+into dummy variables in an efficient and meaningful way. Because there are too many levels. Besides, it is not a good idea to change 
+them directly to factors, since there is no max and min wind direction, the factors does not make sense.So drop these categorcal variables.
+```{r}
+#standarlize data
+k_df <- traindf
+k_df$Location <- NULL
+k_df$RainToday <- as.character(k_df$RainToday)
+k_df$RainToday <- revalue(k_df$RainToday,c("Yes"=1))
+k_df$RainToday <- revalue(k_df$RainToday,c("No"=0))
+k_df$RainToday <- as.numeric(k_df$RainToday)
+#drop raintomorrow, since it is the attribute that we are going to predict
+k_df$RainTomorrow <- NULL
+#scale the data, we do not want a single attribute to be a dominant role in the clustering
+k_df <- scale(k_df)
+```
+
+optimal clusters
+```{r}
+set.seed(123)
+wss <- function(k){kmeans(k_df,k,nstart = 25,iter.max = 200,algorithm = "MacQueen")$tot.withinss}
+```
+i use the MacQueen algorithm here because the default Hartigan Wong clustering consume more ram to run that might break my rstudio. Also, 
+the iter.max hyperparameter has to be set to much higher for Hartigan Wong. Besides, Hartigan-Wong leads to excedding the maximum of Quick Transfer 
+
+```{r}
+k_value <- 1:15
+wss_value <- map_dbl(k_value,wss)
+elbow <- plot(k_value,wss_value,type = "b")
+```
+according to the plot, 4 or 5 is a good choice for number of clusters
+
+after testing both 4&5 as number of clusters, 5 gives a beeter accuracy, so set centers=5
+```{r}
+kout <- kmeans(k_df,centers = 5,iter.max = 200,nstart = 25,algorithm = "MacQueen")
+#visulize the cluster assignment
+kplot <- fviz_cluster(kout,data=train_num)
+kplot
+kindex <- kout[["cluster"]]
+```
+The way I repurpose the K-means clustering (and the following HAC) to predict the attribute RainTomorrow is to first fit the dataset into clusters, and each 
+clusters need to be as discrete as possible, meaning that in each cluster, for example, I want the majority of the data points belong to raintomorrow = yes.
+Then I can assume that all the data points in this cluster have raintomorrow = yes. Then we can compare the clustering result with the RainTomorrow attribute
+in the dataset to get the confusion matrix and accuracy.
+
+```{r}
+kresult <- data.frame(kindex,traindf$RainTomorrow)
+k_table <- as.data.frame.matrix(table(kresult))
+k_table$TruePosNeg <- apply(k_table,1,max)
+k_accu <- sum(k_table$TruePosNeg)/nrow(k_df)
+k_accu
+```
+Based on resutls given by the table, we assume all cases fall into clusters 1, 3, and 4 have raintomorrow=yes, and clusters 2 and 5 are 
+not raining tomorrow.The the accuracy of the model is 0.686
+In general, the accuracy is not very high for unsupervised data. But the dataset we are working on has many missing values, and I imputed with reasonable
+guesses from random forrest. This might be a potential factor that leads to low accuracy. Then, K-means is usually used just for clustering, but here we 
+are trying to use it to predict. This is not a very good idea, and we have categorical attributes involved in our clustering model.
+
+**HAC Clustering**
+```{r}
+#calculate the distance matrix (not runing the code below for saving time and ram)
+#dist_mat <- distance_matrix(distances(k_df))
+```
+the distance matrix of the whole training set is extremely large, about 10 Gb, which is beyond the ability of my personal computer.
+Thus, I decided to slice a sample of the dataset for calculating the distance matrix. After multiple trials, I found about half of the
+original data size 20000 is a good balance for the reliability and performance
+```{r}
+set.seed(12345)
+hac_df1 <- as.data.frame(sample_n(traindf,20000))
+hac_df <- hac_df1
+hac_df$Location <- NULL
+hac_df$RainToday <- NULL
+```
+
+I have ran the clustering with the attribute RainToday, which is a categorical attribute, but the model performs extremly bad. So I decided
+to drop it, and ran the HAC clustering fully on numerical attributes
+```{r}
+hac_df$RainTomorrow <- NULL
+#after trying differnet hyperparameters. For example, since each row of the dataset have similar size, the following settings works the best
+hac_df2 <- scale(hac_df)
+dist_mat <- distance_matrix(distances(hac_df2))
+hac <- fastcluster::hclust(dist_mat,method = "complete")
+hacplot <-  plot(hac,cex=0.6,hang=-1)
+hacplot
+```
+
+It is tricky to set an apropriate number of clustering for the HAC model to cute the tree. Although when the number of clustering is extremly large,
+i.e. each cluster contain very few data points can have a high accuracy, it definitely leads to overfitting. Thus, I tried with comparable size of 
+clusters with k-means and found 8 gives a relatively high accuracy
+```{r}
+clustergroup <- cutree(hac,k=8)
+hac_result <- data.frame(clustergroup,hac_df1$RainTomorrow)
+hac_table <- as.data.frame.matrix(table(hac_result))
+hac_table$TruePosNeg <- apply(hac_table,1,max) 
+hac_accu <- sum(hac_table$TruePosNeg)/nrow(hac_df)
+hac_accu
+```
+clustering prediction model based on distribution of raintomorrow in each cluster: trainTomorrow=Yes, Clusters: 1,4,5,6,7. trainTomorrow=No, Clusters:
+2,3,8 the accuracy of the HACclustering is 0.603, which is lower than the accuracy I got from k-means. The HACclustering might not be a good choice to 
+predict if it is going to rain tomorrow. But interestingly, as the first cluster has the largest size, the data points in it are the least scattered. While 
+in some smaller clusters, such as #4 and #5, the data points in the clusters are discrete, which expalins why the HAC model does not have a high accuracy,
+since the majority of the data fall into some of the less discree clusters. In general, both of them do not work well, because they are not suitable for 
+categorical attributes. I mainly use the confusion matrix and accuracy to justify their performance. Other evaluation statistics such as Kappa statistics, 
+sensitivity, specificity, etc. are calculated using the confusion matrix, and the conclusion is that the results from k-means model are better than the HAC 
+
+**Decision Tree Classification**
+build a model with default hyper-parameters
+```{r}
+set.seed(1234)
+train_ind <- sample(1:nrow(traindf),0.8*nrow(traindf))
+test_ind <- setdiff(1:nrow(traindf),train_ind)
+dt_model <- rpart(RainTomorrow~.,data = traindf[train_ind,], method = "class")
+dt_plot <- fancyRpartPlot(dt_model)
+dt_predict <- predict(dt_model,newdata = traindf[test_ind,],type = "class")
+dt_result <- confusionMatrix(dt_predict,as.factor(traindf[test_ind,]$RainTomorrow))
+```
+
+run the dt model with different minsplit and maxdepth hyperparameter setting, and see if any of the combinations have a lower xerror value
+```{r}
+hyper_grid <- expand.grid(
+  minsplit = seq(5,20,1),
+  maxdepth = seq(8,15,1)
+)
+
+dt_tune <-list()
+for (i in 1:nrow(hyper_grid)){
+  minsplit <- hyper_grid$minsplit[i]
+  maxdepth <- hyper_grid$maxdepth[i]
+dt_tune[[i]] <- rpart(RainTomorrow~.,data = traindf[train_ind,], method = "class",control = list(minsplit = minsplit,maxdepth = maxdepth))
+}
+get_cp <- function(x) {
+  min <- which.min(x$cptable[,"xerror"])
+  cp <- x$cptable[min,"CP"]
+}
+get_min_error <- function(x){
+  min <- which.min(x$cptable[,"xerror"])
+  xerror <- x$cptable[min,"xerror"]
+}
+hyper_grid %>%
+  mutate(
+    cp = map_dbl(dt_tune,get_cp),
+    error = map_dbl(dt_tune,get_min_error)
+  ) %>%
+  arrange(error) %>%
+  top_n(-3, wt = error)
+```
+from the top combinations, we can tell that the xerror is less than the default hyperparameters, but only to a limited scale. This might due
+to the charicteristics of the dataset itself. 
+
+try with the obtained hyperparameter
+```{r}
+dt_model1 <- rpart(RainTomorrow~.,data = traindf[train_ind,], method = "class",control = list(minsplit = 12,maxdepth = 9))
+dt_predict1 <- predict(dt_model1,newdata = traindf[test_ind,],type = "class")
+dt_result1 <- confusionMatrix(dt_predict1,as.factor(traindf[test_ind,]$RainTomorrow))
+```
+from the confusion matrix, i found that the accuracy of the model is 0.745, which is obviously higher than the accuracy I got from K-means
+and HAC clustering. The tunning does not increase the accuracy a lot. I think a potential reason might be seen from the plot of the final model,
+When running with the default hyperparameters, the final model was already nice and clean with very few leafs, and each leaf contains a fair amount
+of data points. Thus, the hyperparameter tunning does noe affect the accuracy very much. Not suprisingly, the humidity is a vital part in the 
+classification model, which confirms with the result we got from the descriptive analysis
+
+evaluation
+```{r}
+dt_predict2 <- predict(dt_model1,newdata = traindf[test_ind,],type = "prob")
+roc_pred <- as.data.frame(dt_predict2)
+roc_curve <- roc(traindf[test_ind,]$RainTomorrow,roc_pred$Yes)
+plot(roc_curve)
+auc(roc_curve)
+```
+the roc_curve is generated from the confusion matrix to summarize the evaluation information. The plot shows how the threshold changes the 
+sensitivity and specificity. Then the auc calculates the area under the curve as an evaluation of the categorization model. The larger the
+value, the better the classifier. In this case the auc=0.76 is fiarly a good value. If other classification models can be employed, we can
+compare the auc and pick the one with the higher value
+
+**predict the test dataset with k-means, HAC, and Decision Tree**
+inpput the test data and check where the missing values are and how many of them
+```{r}
+testdf <- read_csv(file = "Weather Forecast Testing.csv")
+NA_table1 <- sort(sapply(testdf, function(x) sum(is.na(x))))
+NA_table1
+#remove the columns to keep consistency with the training data
+testdf$Cloud <- NULL
+testdf$Evaporation <- NULL
+testdf$Sunshine <- NULL
+testdf$WindDir <- NULL
+testdf$WindGustDir <- NULL
+```
+
+data preparation using the mice package as implemented on the traing dataset
+```{r}
+conv_cols1 <- c('Location','RainToday')
+imp_test <- testdf
+imp_test[conv_cols1] <- lapply(testdf[conv_cols1], as.factor)
+#take a closer look at the missing values and use the  MICE package for imputation
+impute1 <- mice(imp_test,method='pmm', maxit = 2)
+miceout1 <- complete(impute1)
+#replace the columns with NAs with the output from mice
+testdf$MaxTemp <- miceout1$MaxTemp
+testdf$MinTemp <- miceout1$MinTemp
+testdf$Rainfall <- miceout1$Rainfall
+testdf$RainToday <- miceout1$RainToday
+testdf$WindSpeed <- miceout1$WindSpeed
+testdf$Temp <- miceout1$Temp
+testdf$Humidity <- miceout1$Humidity
+testdf$WindGustSpeed <- miceout1$WindGustSpeed
+testdf$Pressure <- miceout1$Pressure
+```
+
+check if there is any missing values left
+```{r}
+NA_table1 <- sort(sapply(testdf, function(x) sum(is.na(x))))
+NA_table1
+```
+no more missing values
+
+remove outliers using the same technic as done on the training data
+```{r}
+testdf$MinTemp[testdf$MinTemp < boxplot(testdf$MinTemp)$stats[1,]] <- boxplot(testdf$MinTemp)$stats[1,]
+testdf$MinTemp[testdf$MinTemp > boxplot(testdf$MinTemp)$stats[5,]] <- boxplot(testdf$MinTemp)$stats[5,]
+
+testdf$MinTemp[testdf$MaxTemp < boxplot(testdf$MaxTemp)$stats[1,]] <- boxplot(testdf$MaxTemp)$stats[1,]
+testdf$MinTemp[testdf$MaxTemp > boxplot(testdf$MaxTemp)$stats[5,]] <- boxplot(testdf$MaxTemp)$stats[5,]
+
+testdf$MinTemp[testdf$Rainfall < boxplot(testdf$Rainfall)$stats[1,]] <- boxplot(testdf$Rainfall)$stats[1,]
+testdf$MinTemp[testdf$Rainfall > boxplot(testdf$Rainfall)$stats[5,]] <- boxplot(testdf$Rainfall)$stats[5,]
+
+testdf$MinTemp[testdf$WindGustSpeed < boxplot(testdf$WindGustSpeed)$stats[1,]] <- boxplot(testdf$WindGustSpeed)$stats[1,]
+testdf$MinTemp[testdf$WindGustSpeed > boxplot(testdf$WindGustSpeed)$stats[5,]] <- boxplot(testdf$WindGustSpeed)$stats[5,]
+
+testdf$MinTemp[testdf$WindSpeed < boxplot(testdf$WindSpeed)$stats[1,]] <- boxplot(testdf$WindSpeed)$stats[1,]
+testdf$MinTemp[testdf$WindSpeed > boxplot(testdf$WindSpeed)$stats[5,]] <- boxplot(testdf$WindSpeed)$stats[5,]
+
+testdf$MinTemp[testdf$Humidity < boxplot(testdf$Humidity)$stats[1,]] <- boxplot(testdf$Humidity)$stats[1,]
+testdf$MinTemp[testdf$Humidity > boxplot(testdf$Humidity)$stats[5,]] <- boxplot(testdf$Humidity)$stats[5,]
+
+testdf$MinTemp[testdf$Pressure < boxplot(testdf$Pressure)$stats[1,]] <- boxplot(testdf$Pressure)$stats[1,]
+testdf$MinTemp[testdf$Pressure > boxplot(testdf$Pressure)$stats[5,]] <- boxplot(testdf$Pressure)$stats[5,]
+
+testdf$MinTemp[testdf$Temp < boxplot(testdf$Temp)$stats[1,]] <- boxplot(testdf$Temp)$stats[1,]
+testdf$MinTemp[testdf$Temp > boxplot(testdf$Temp)$stats[5,]] <- boxplot(testdf$Temp)$stats[5,]
+```
+
+use k-means to predict the test set
+prepare the test dataset
+```{r}
+tk_df<- testdf
+tk_df$Location<-NULL
+tk_df$ID <- NULL
+tk_df$RainToday <- as.character(tk_df$RainToday)
+tk_df$RainToday <- revalue(tk_df$RainToday,c("Yes"=1))
+tk_df$RainToday <- revalue(tk_df$RainToday,c("No"=0))
+tk_df$RainToday <- as.numeric(tk_df$RainToday)
+tk_df <- scale(tk_df)
+```
+
+run the k-means model built on the training data to predict if it is raining tomorrow on the test dataset
+```{r}
+test_pred_k <- cl_predict(kout,tk_df)
+test_kresult <- data.frame(testdf$ID,as.character(test_pred_k))
+test_kresult$as.character.test_pred_k. <- as.character(test_kresult$as.character.test_pred_k.)
+test_kresult$as.character.test_pred_k. <- revalue(test_kresult$as.character.test_pred_k.,c("1"="Yes"))
+test_kresult$as.character.test_pred_k. <- revalue(test_kresult$as.character.test_pred_k.,c("2"="No"))
+test_kresult$as.character.test_pred_k. <- revalue(test_kresult$as.character.test_pred_k.,c("3"="Yes"))
+test_kresult$as.character.test_pred_k. <- revalue(test_kresult$as.character.test_pred_k.,c("4"="Yes"))
+test_kresult$as.character.test_pred_k. <- revalue(test_kresult$as.character.test_pred_k.,c("5"="No"))
+```
+the above block of code assign clusters for data points in the new dataset,i.e. the test dataset, by calculating the distance to 
+centroids of clustersto the clusters built on the training data. As stated in the K-means clusting for training data, clusters 1,
+3, and 5 are categorized as raining tomorrow, and clusters 2 and 4 are categorized as not raining tomorrow
+
+save the result into the general prediction resutls dataframe
+```{r}
+pred_result <- test_kresult
+names(pred_result)[names(pred_result)=="testdf.ID"] <- "ID"
+names(pred_result)[names(pred_result)=="as.character.test_pred_k."] <- "K-means"
+```
+
+run the HAC model built on the training data
+prepare the test data
+```{r}
+thac_df <- testdf
+thac_df$RainToday<-NULL
+thac_df$Location<-NULL
+thac_df$ID <- NULL
+thac_df <- scale(thac_df)
+```
+
+use the HAC model built on the training data to predict if it is raining tomorrow on the test dataset
+```{r}
+knnclust <- knn(train = hac_df2,test = thac_df,k=1,cl = clustergroup)
+test_hacresult <- data.frame(testdf$ID,as.character(knnclust))
+test_hacresult$as.character.knnclust. <- revalue(test_hacresult$as.character.knnclust.,c("1"="Yes")) 
+test_hacresult$as.character.knnclust. <- revalue(test_hacresult$as.character.knnclust.,c("2"="No")) 
+test_hacresult$as.character.knnclust. <- revalue(test_hacresult$as.character.knnclust.,c("3"="No")) 
+test_hacresult$as.character.knnclust. <- revalue(test_hacresult$as.character.knnclust.,c("4"="Yes")) 
+test_hacresult$as.character.knnclust. <- revalue(test_hacresult$as.character.knnclust.,c("5"="Yes")) 
+test_hacresult$as.character.knnclust. <- revalue(test_hacresult$as.character.knnclust.,c("6"="Yes")) 
+test_hacresult$as.character.knnclust. <- revalue(test_hacresult$as.character.knnclust.,c("7"="Yes")) 
+test_hacresult$as.character.knnclust. <- revalue(test_hacresult$as.character.knnclust.,c("8"="No")) 
+#save the result into the general prediction results dataframe
+pred_result$HAC <- test_hacresult$as.character.knnclust.
+```
+the knn function for nearest neighboors is employed here to run our HAC model on the test dataset. Because the HAC clustering output
+does not have centroids. In order to run the HAC model on new data, the knn function assigns each new data point to the nearest HAC
+clustering. As a result, the test datapoints assigned to clusters 1, 4, 5, 6, 7 are categorized as raining tomorrow, and the rest are
+categorized into not raining tomorrow.
+
+predict with decision tree model
+```{r}
+test_dtresult <- predict(dt_model1,newdata = testdf,type = "class")
+#save the result into the general prediction results dataframe
+pred_result$DT <- test_dtresult
+```
+running the decision tree model on the test dataset is very straight forward, since the dt_model1 has
+all the hyperparameters stored for employing the predict function. 
+
+check the prediciton output from three different methods and write the dataframe as a .csv file
+```{r}
+head(pred_result,10)
+#save as .csv file
+write.csv(pred_result,'prediction.csv')
+```
