@@ -1,2 +1,2 @@
 # Academic Projects
- Here are my machine learning projects done at Syracuse University
+ Here are my data science related projects done at Syracuse University
